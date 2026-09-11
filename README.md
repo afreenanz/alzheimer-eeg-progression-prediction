@@ -312,13 +312,39 @@ matters most once scaling up (more subjects, full LOSO, more GAN epochs,
 %cd alzheimer-eeg-progression-prediction
 !pip install -r requirements.txt
 !pip install awscli   # not preinstalled on Colab
-!python download_dataset.py --n-subjects 20
-!python run_pipeline.py --n_subjects 20 --folds 3 --gan_epochs 50
-!python -m src.plots
+!python download_dataset.py --n-subjects 65
 ```
 
 No venv needed on Colab -- each notebook session is already an isolated
 environment.
+
+### Running in stages (recommended on Colab -- avoids losing progress to disconnects)
+
+Free-tier Colab sessions can disconnect mid-run, and `run_pipeline.py`'s
+default single-process mode keeps everything in memory -- a disconnect
+during a multi-hour run loses all of it. Running each stage as its own
+cell avoids this: a disconnect only costs whichever single stage was
+running, and re-running a completed stage is a no-op (it loads the saved
+result instead of redoing the work).
+
+```python
+# Stage 1: build + cache the dataset (run once; safe to re-run if it fails)
+!python run_pipeline.py --stage build --n_subjects 65
+
+# Stage 2: one fold per cell -- run these one at a time
+!python run_pipeline.py --stage fold --fold 1 --n_subjects 65 --folds 3 --gan_epochs 50
+!python run_pipeline.py --stage fold --fold 2 --n_subjects 65 --folds 3 --gan_epochs 50
+!python run_pipeline.py --stage fold --fold 3 --n_subjects 65 --folds 3 --gan_epochs 50
+
+# Stage 3: combine all fold results into the final report (only once all folds are done)
+!python run_pipeline.py --stage aggregate --folds 3
+
+!python -m src.plots
+```
+
+If a fold's cell disconnects partway through, just re-run that exact
+same cell -- earlier folds are untouched, and this fold starts fresh
+(no partial-fold resume within a single fold, only across folds).
 
 ## Outputs
 

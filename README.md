@@ -308,8 +308,8 @@ matters most once scaling up (more subjects, full LOSO, more GAN epochs,
 224x224 images -- see **Scaling up** above).
 
 ```python
-!git clone <your-repo-url>
-%cd alzheimer_eeg
+!git clone https://github.com/afreenanz/alzheimer-eeg-progression-prediction.git
+%cd alzheimer-eeg-progression-prediction
 !pip install -r requirements.txt
 !pip install awscli   # not preinstalled on Colab
 !python download_dataset.py --n-subjects 20

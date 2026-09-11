@@ -1,0 +1,19 @@
+venv/
+__pycache__/
+*.pyc
+data/
+.ipynb_checkpoints/
+.DS_Store
+
+# Regenerable / heavy build artifacts from a fresh pipeline run -- not
+# checked in since they're large and reproduce automatically via
+# `python run_pipeline.py`. Archived past-run evidence under
+# outputs/results/run*/ IS checked in (see the exceptions below) since
+# that's small, real evidence worth keeping in the repo history.
+outputs/scalograms/
+outputs/models/
+outputs/gradcam/*.png
+outputs/results/*.png
+outputs/results/*.txt
+outputs/results/*.npz
+!outputs/results/run*/

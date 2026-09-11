@@ -1,0 +1,26 @@
+======================================================================
+EEG-Based Alzheimer's Progression Prediction -- Metrics Report
+======================================================================
+Label mode: AD_HC (see config.py / README for rationale)
+Folds: 3 (subject-level GroupKFold)
+
+-- Classification (mean +/- std across folds) --
+  accuracy    : 0.6679 +/- 0.2021
+  recall      : 0.9595 +/- 0.0572
+  f1_score    : 0.7514 +/- 0.1260
+  auc_roc     : 0.6580 +/- 0.2147
+
+-- Brain Age Regression (mean +/- std across folds) --
+  mae         : 6.1427 +/- 0.4672
+  rmse        : 7.8712 +/- 0.7941
+  r2          : -0.8575 +/- 0.5497
+  correlation : 0.1622 +/- 0.3171
+
+-- GAN Augmentation vs. Baseline (no augmentation) --
+  with_gan:
+    accuracy    : 0.6679
+    f1_score    : 0.7514
+  without_gan:
+    accuracy    : 0.4146
+    f1_score    : 0.4123
+======================================================================

@@ -16,4 +16,5 @@ outputs/gradcam/*.png
 outputs/results/*.png
 outputs/results/*.txt
 outputs/results/*.npz
+outputs/results/checkpoints/
 !outputs/results/run*/

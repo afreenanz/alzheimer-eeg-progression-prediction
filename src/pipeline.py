@@ -75,8 +75,77 @@ def _find_subject_set_file(subject_id):
     return candidate  # will fail validate_format() with a clear error
 
 
-def build_dataset(labels, cwt_transformer=None, preprocessor=None, save_scalograms=True):
+def _process_one_subject(subject_id, info, cwt_transformer, preprocessor, resolved_channels_box, save_scalograms):
+    """Load, clean, and CWT-transform one subject. Returns arrays or None.
+
+    Factored out of `build_dataset` so it can be called per-subject and
+    its result written to a shard file immediately, instead of being
+    held in a list that grows for the entire (multi-hour, for larger
+    subject counts) dataset-building loop -- see module docstring on
+    memory. `resolved_channels_box` is a single-item list used as an
+    in/out box so the channel subset is resolved once and shared.
+    """
+    set_path = _find_subject_set_file(subject_id)
+    raw = load_subject_safely(set_path)
+    if raw is None:
+        logger.error("Skipping %s: could not load EEG file.", subject_id)
+        return None
+
+    if resolved_channels_box[0] is None:
+        resolved_channels_box[0] = resolve_channel_subset(raw.ch_names)
+        logger.info("Resolved CWT channel subset: %s", resolved_channels_box[0])
+    resolved_channels = resolved_channels_box[0]
+
+    try:
+        filtered = preprocessor.filter(raw)
+        cleaned = preprocessor.remove_artifacts(filtered)
+        epochs = preprocessor.extract_epochs(cleaned)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Skipping %s: preprocessing failed (%s).", subject_id, exc)
+        return None
+
+    if len(epochs) == 0:
+        logger.error("Skipping %s: 0 usable epochs.", subject_id)
+        return None
+
+    available = [ch for ch in resolved_channels if ch in epochs.ch_names]
+    if len(available) < len(resolved_channels):
+        logger.warning(
+            "%s: missing some resolved channels %s; using %s instead.",
+            subject_id, resolved_channels, available,
+        )
+    epoch_array = epochs.get_data(picks=available)  # (n_epochs, n_channels, n_times)
+    sfreq = epochs.info["sfreq"]
+
+    subject_X = []
+    for epoch_idx in range(epoch_array.shape[0]):
+        scalogram = cwt_transformer.transform(epoch_array[epoch_idx], sampling_rate=sfreq)
+        if save_scalograms:
+            cwt_transformer.save_scalogram(scalogram, info["class_label"], subject_id, epoch_idx)
+        subject_X.append(scalogram)
+
+    n = len(subject_X)
+    return (
+        np.stack(subject_X).astype(np.float32),
+        np.full(n, info["class_idx"], dtype=np.int64),
+        np.full(n, info["age"], dtype=np.float32),
+        np.full(n, subject_id),
+    )
+
+
+def build_dataset(labels, cwt_transformer=None, preprocessor=None, save_scalograms=True, shard_dir=None):
     """Run steps 1-4 of the pipeline: raw EEG -> labeled scalogram dataset.
+
+    Memory note: processes and (if `shard_dir` given) saves one subject
+    at a time to its own small file on disk, instead of accumulating
+    every subject's scalograms in one growing in-memory list for the
+    entire loop -- for larger subject counts this loop can run for
+    hours, and a Python process holding gigabytes of steadily-growing
+    data for that long is exactly the kind of thing that turns into
+    severe swapping if system memory is also under pressure from other
+    running applications (observed in practice on a shared laptop).
+    Sharding also makes this step resumable per-subject: if interrupted,
+    already-sharded subjects are skipped on the next run.
 
     Parameters
     ----------
@@ -87,6 +156,9 @@ def build_dataset(labels, cwt_transformer=None, preprocessor=None, save_scalogra
     preprocessor : Preprocessor, optional
     save_scalograms : bool
         Whether to persist each scalogram to outputs/scalograms/.
+    shard_dir : str, optional
+        If given, cache each subject's arrays to
+        `{shard_dir}/{subject_id}.npz` and skip subjects already sharded.
 
     Returns
     -------
@@ -95,64 +167,81 @@ def build_dataset(labels, cwt_transformer=None, preprocessor=None, save_scalogra
     """
     cwt_transformer = cwt_transformer or CWTTransformer()
     preprocessor = preprocessor or Preprocessor()
+    resolved_channels_box = [None]
 
-    X, y_class, y_age, subject_ids = [], [], [], []
-    resolved_channels = None
+    if shard_dir:
+        os.makedirs(shard_dir, exist_ok=True)
 
     for subject_id, info in labels.items():
-        set_path = _find_subject_set_file(subject_id)
-        raw = load_subject_safely(set_path)
-        if raw is None:
-            logger.error("Skipping %s: could not load EEG file.", subject_id)
+        shard_path = os.path.join(shard_dir, f"{subject_id}.npz") if shard_dir else None
+        if shard_path and os.path.exists(shard_path):
+            logger.info("%s already sharded; skipping.", subject_id)
             continue
 
-        if resolved_channels is None:
-            resolved_channels = resolve_channel_subset(raw.ch_names)
-            logger.info("Resolved CWT channel subset: %s", resolved_channels)
-
-        try:
-            filtered = preprocessor.filter(raw)
-            cleaned = preprocessor.remove_artifacts(filtered)
-            epochs = preprocessor.extract_epochs(cleaned)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Skipping %s: preprocessing failed (%s).", subject_id, exc)
+        result = _process_one_subject(
+            subject_id, info, cwt_transformer, preprocessor, resolved_channels_box, save_scalograms
+        )
+        if result is None:
             continue
 
-        if len(epochs) == 0:
-            logger.error("Skipping %s: 0 usable epochs.", subject_id)
-            continue
+        if shard_path:
+            X_s, yc_s, ya_s, sid_s = result
+            np.savez(shard_path, X=X_s, y_class=yc_s, y_age=ya_s, subject_ids=sid_s)
+        # `result` (and the subject's raw/epochs objects, out of scope by
+        # now) can be garbage-collected here -- nothing keeps this
+        # subject's data alive across loop iterations when sharding.
 
-        available = [ch for ch in resolved_channels if ch in epochs.ch_names]
-        if len(available) < len(resolved_channels):
-            logger.warning(
-                "%s: missing some resolved channels %s; using %s instead.",
-                subject_id, resolved_channels, available,
+    # Final assembly: read every subject's shard back and concatenate.
+    # This is fast (no recomputation, just disk reads) and only holds
+    # the full dataset in memory briefly, rather than for the whole loop.
+    if shard_dir:
+        X, y_class, y_age, subject_ids = [], [], [], []
+        for subject_id in labels:
+            shard_path = os.path.join(shard_dir, f"{subject_id}.npz")
+            if not os.path.exists(shard_path):
+                continue  # this subject was skipped (load/preprocess failure)
+            data = np.load(shard_path)
+            X.append(data["X"])
+            y_class.append(data["y_class"])
+            y_age.append(data["y_age"])
+            subject_ids.append(data["subject_ids"])
+        if not X:
+            raise RuntimeError(
+                "No usable data produced by build_dataset -- all subjects were "
+                "skipped. Check data/ layout and participants.tsv."
             )
-        epoch_array = epochs.get_data(picks=available)  # (n_epochs, n_channels, n_times)
-        sfreq = epochs.info["sfreq"]
+        return (
+            np.concatenate(X).astype(np.float32),
+            np.concatenate(y_class).astype(np.int64),
+            np.concatenate(y_age).astype(np.float32),
+            np.concatenate(subject_ids),
+        )
 
-        for epoch_idx in range(epoch_array.shape[0]):
-            scalogram = cwt_transformer.transform(epoch_array[epoch_idx], sampling_rate=sfreq)
-            if save_scalograms:
-                cwt_transformer.save_scalogram(
-                    scalogram, info["class_label"], subject_id, epoch_idx
-                )
-            X.append(scalogram)
-            y_class.append(info["class_idx"])
-            y_age.append(info["age"])
-            subject_ids.append(subject_id)
+    # No sharding requested: original in-memory-only behavior (fine for
+    # small subject counts, e.g. the smoke test's synthetic data path).
+    X, y_class, y_age, subject_ids = [], [], [], []
+    for subject_id, info in labels.items():
+        result = _process_one_subject(
+            subject_id, info, cwt_transformer, preprocessor, resolved_channels_box, save_scalograms
+        )
+        if result is None:
+            continue
+        X_s, yc_s, ya_s, sid_s = result
+        X.append(X_s)
+        y_class.append(yc_s)
+        y_age.append(ya_s)
+        subject_ids.append(sid_s)
 
     if not X:
         raise RuntimeError(
             "No usable data produced by build_dataset -- all subjects were "
             "skipped. Check data/ layout and participants.tsv."
         )
-
     return (
-        np.stack(X).astype(np.float32),
-        np.array(y_class, dtype=np.int64),
-        np.array(y_age, dtype=np.float32),
-        np.array(subject_ids),
+        np.concatenate(X).astype(np.float32),
+        np.concatenate(y_class).astype(np.int64),
+        np.concatenate(y_age).astype(np.float32),
+        np.concatenate(subject_ids),
     )
 
 
@@ -163,7 +252,9 @@ def build_or_load_dataset(n_subjects=config.N_SUBJECTS_SUBSET, cache_path=None):
     CWT for every epoch of every subject) and does not depend on the
     GPU at all -- caching it to disk means it only ever needs to run
     once per `n_subjects` choice, even across separate Colab sessions
-    that each start a fresh process.
+    that each start a fresh process. The build itself is also sharded
+    per-subject (see `build_dataset`) so it survives being interrupted
+    partway through, not just between full runs.
 
     Parameters
     ----------
@@ -189,7 +280,8 @@ def build_or_load_dataset(n_subjects=config.N_SUBJECTS_SUBSET, cache_path=None):
     all_labels = get_labels()
     labels = subset_subjects(all_labels, n_subjects=n_subjects)
     logger.info("Building dataset for %d subjects (not cached yet).", len(labels))
-    X, y_class, y_age, subject_ids = build_dataset(labels)
+    shard_dir = os.path.join(CHECKPOINT_DIR, "subject_shards", f"{n_subjects}subj")
+    X, y_class, y_age, subject_ids = build_dataset(labels, shard_dir=shard_dir)
 
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     np.savez(cache_path, X=X, y_class=y_class, y_age=y_age, subject_ids=subject_ids)

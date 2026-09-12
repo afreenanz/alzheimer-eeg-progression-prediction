@@ -167,6 +167,31 @@ A second real-data run with this fix has not yet been completed (the
 first run alone took ~2.5 hours on CPU) -- see **Switching to Colab**
 below for the intended next run.
 
+**Two further fixes applied on the same reasoning, before that next run:**
+
+- **Age normalization.** Age (raw years, errors in the 30-100+ range)
+  and classification cross-entropy (roughly 0-1 range) live on very
+  different numeric scales. Even with `loss_weights` down-weighting
+  regression, its much larger raw magnitude could still dominate the
+  shared backbone's gradient updates -- actively hurting the
+  classification head it shares weights with, on top of the GAN issue
+  above. `CNNClassifier.train()` now z-score normalizes age internally
+  (train-set only, no leakage) and `predict()` un-normalizes back to
+  real years transparently; the normalization stats are persisted
+  alongside the saved model so a reloaded model (e.g. in
+  `predict_subject.py`) still un-normalizes correctly.
+- **Validation split + early stopping.** Training previously ran a
+  fixed 30 epochs with no check on overfitting. `CNNClassifier.train()`
+  now automatically holds out 15% of the training data (stratified by
+  class) as a validation set and stops early (`patience=5`,
+  `restore_best_weights=True`) once validation loss stops improving --
+  standard practice against overfitting on a dataset this small. Skipped
+  automatically if a fold has too few samples per class for a
+  meaningful split.
+
+These are also unvalidated against real data as of this writing --
+next real run should show whether they help.
+
 ## Other scale reductions
 
 | Report spec | This build | Config knob |

@@ -362,7 +362,7 @@ result instead of redoing the work).
 !python run_pipeline.py --stage fold --fold 3 --n_subjects 65 --folds 3 --gan_epochs 50
 
 # Stage 3: combine all fold results into the final report (only once all folds are done)
-!python run_pipeline.py --stage aggregate --folds 3
+!python run_pipeline.py --stage aggregate --n_subjects 65 --folds 3
 
 !python -m src.plots
 ```

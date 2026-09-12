@@ -11,7 +11,7 @@ running:
     python run_pipeline.py --stage fold --fold 1 --n_subjects 65 --folds 3 --gan_epochs 50
     python run_pipeline.py --stage fold --fold 2 --n_subjects 65 --folds 3 --gan_epochs 50
     python run_pipeline.py --stage fold --fold 3 --n_subjects 65 --folds 3 --gan_epochs 50
-    python run_pipeline.py --stage aggregate --folds 3
+    python run_pipeline.py --stage aggregate --n_subjects 65 --folds 3
 
 Re-running the same `--stage fold --fold N` command after a disconnect
 is safe -- a fold that already finished is loaded from disk instead of
@@ -102,7 +102,15 @@ def main():
         )
 
     elif args.stage == "aggregate":
-        aggregate_fold_results(args.folds)
+        # Recompute effective_folds the same way --stage fold did (rather
+        # than trusting args.folds directly) so a subject count too small
+        # to support the requested fold count can't cause aggregate to
+        # look for a fold that was never created. The dataset is already
+        # cached by this point (from --stage build), so this just loads
+        # the cache -- no rebuild cost.
+        X, y_class, y_age, subject_ids = build_or_load_dataset(args.n_subjects)
+        _, effective_folds = compute_fold_splits(X, y_class, subject_ids, args.folds)
+        aggregate_fold_results(effective_folds)
         logger.info("Pipeline complete. See outputs/results/metrics_report.txt")
 
 
